@@ -1,0 +1,33 @@
+# Render blueprint. Push this repository, then in Render:
+#   New → Blueprint → pick this repo → Apply.
+#
+# There is no build step. The apps are plain files and the host is plain Node,
+# so a deploy is a checkout and a process start — which is also why it can be
+# rolled back by redeploying an older commit with nothing to rebuild.
+services:
+  - type: web
+    name: practice
+    runtime: node
+    plan: free
+    # `--omit=dev` is safe and fast here: the host has no runtime dependencies
+    # at all, and everything in devDependencies exists only to test the apps.
+    buildCommand: npm ci --omit=dev
+    startCommand: npm start
+    healthCheckPath: /healthz
+    envVars:
+      - key: NODE_VERSION
+        value: '22'
+      # Each app's address, named after its folder under apps/. Overrides the
+      # slug in that app's app.json; set one empty to take that app off the air
+      # without removing it.
+      #
+      # A value set in the Render dashboard overrides this file and is NOT
+      # updated by re-applying the blueprint, so check the dashboard after
+      # editing anything here.
+      - key: SLUG_CLOCKWORK
+        value: 'calc'
+      # Playwright is a dev dependency used only by the apps' browser tests.
+      # Without this a build that did include dev deps would download a browser
+      # it will never run.
+      - key: PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD
+        value: '1'

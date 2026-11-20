@@ -1,0 +1,1150 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no"
+    />
+    <title>Calculator</title>
+
+    <!--
+      Home-screen install. `apple-mobile-web-app-capable` is what drops Safari's
+      address bar and tab strip, which is the whole point here: with them on
+      screen nobody believes this is the system calculator.
+
+      Everything is in this one file on purpose. No network, no fonts to fetch,
+      no service worker to go stale — it works in a basement with no signal,
+      which is where it will be used.
+    -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black" />
+    <meta name="apple-mobile-web-app-title" content="Calculator" />
+    <meta name="theme-color" content="#000000" />
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="./icon-180.png" />
+
+    <style>
+      :root {
+        --orange: #ff9f0a;
+        --grey-light: #6b6b6b;
+        --grey-dark: #2e2e2e;
+        --chrome: #1c1c1e;
+
+        /* The size the readout starts at. Script shrinks from here when a long
+           number would not fit, so these are a ceiling and not a promise. */
+        --entry-size: clamp(3.2rem, 20vw, 5.5rem);
+        --expression-size: clamp(1rem, 5vw, 1.6rem);
+      }
+
+      * {
+        box-sizing: border-box;
+        -webkit-tap-highlight-color: transparent;
+        -webkit-user-select: none;
+        user-select: none;
+        -webkit-touch-callout: none;
+      }
+
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        overflow: hidden;
+        background: #000;
+        color: #fff;
+        font-family:
+          -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Helvetica Neue', sans-serif;
+        font-variant-numeric: tabular-nums;
+      }
+
+      #app {
+        height: 100%;
+        display: flex;
+        flex-direction: column;
+        padding: max(0.5rem, env(safe-area-inset-top)) 0.6rem
+          max(1.2rem, env(safe-area-inset-bottom));
+      }
+
+      /* --- The two round chrome buttons at the top ------------------------- */
+
+      #chrome-row {
+        display: flex;
+        justify-content: space-between;
+        padding: 0.4rem 0.3rem 0;
+      }
+
+      .chrome-button {
+        width: 44px;
+        height: 44px;
+        border-radius: 50%;
+        background: var(--chrome);
+        border: none;
+        display: grid;
+        place-items: center;
+        color: #fff;
+      }
+
+      /* --- Display ---------------------------------------------------------- */
+
+      #display {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        align-items: flex-end;
+        justify-content: flex-end;
+        padding: 0 0.6rem 0.4rem;
+        min-height: 0;
+      }
+
+      /*
+       * The running expression, in grey above the current entry — which is what
+       * the current calculator does, and what lets the audience read the whole
+       * sum back off the screen at the end instead of taking it on trust.
+       */
+      #expression {
+        font-size: var(--expression-size);
+        color: #8e8e93;
+        font-weight: 300;
+        min-height: 1.6em;
+      }
+
+      #entry {
+        font-size: var(--entry-size);
+        font-weight: 300;
+        line-height: 1.05;
+      }
+
+      /*
+       * Both readouts are full-width and right-aligned rather than laid out
+       * right-to-left.
+       *
+       * They used to be `direction: rtl`, which looked identical until a number
+       * outgrew the screen — and then clipped it from the *left*, quietly eating
+       * the most significant digits. An eight-digit answer showing its last six
+       * is worse than useless in front of an audience: it is wrong, and nobody
+       * can tell. Full width also gives the script something to measure against,
+       * since a shrink-to-fit box can never overflow and so never reports that
+       * it needs to shrink.
+       */
+      #expression,
+      #entry {
+        width: 100%;
+        text-align: right;
+        white-space: nowrap;
+        overflow: hidden;
+      }
+
+      /* --- Keypad ----------------------------------------------------------- */
+
+      #keys {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: min(3.2vw, 14px);
+        padding: 0 0.3rem;
+      }
+
+      .key {
+        aspect-ratio: 1;
+        border: none;
+        border-radius: 50%;
+        background: var(--grey-dark);
+        color: #fff;
+        font-size: clamp(1.6rem, 8.5vw, 2.4rem);
+        font-weight: 400;
+        display: grid;
+        place-items: center;
+        transition: filter 0.08s ease;
+      }
+
+      .key:active {
+        filter: brightness(1.45);
+      }
+
+      .key.function {
+        background: var(--grey-light);
+        font-size: clamp(1.4rem, 7vw, 2rem);
+      }
+
+      .key.operator {
+        background: var(--orange);
+        font-size: clamp(1.9rem, 9.5vw, 2.7rem);
+      }
+
+      /* Scales the drawn glyphs (±) with the typed ones in either orientation. */
+      .key svg {
+        width: auto;
+        height: 1.15em;
+      }
+
+      /*
+       * The armed operator stays lit, as the real one does. It matters more here
+       * than it looks: it is the only thing on screen telling you the multiply
+       * has been taken and the taps are live.
+       */
+      .key.operator.armed {
+        background: #fff;
+        color: var(--orange);
+      }
+
+      /*
+       * Swallows every touch while she is tapping.
+       *
+       * She is tapping a screen she cannot see, so a tap has to count wherever
+       * it lands — which means nothing underneath may receive it. Invisible, and
+       * removed the instant the last digit is in so the keypad comes straight
+       * back for the reveal.
+       */
+      #blind {
+        position: fixed;
+        inset: 0;
+        z-index: 50;
+        background: transparent;
+        /* Hands every gesture to the script, scrolls and pinches included, so a
+           dragged thumb cannot do anything the browser would do by default. */
+        touch-action: none;
+      }
+
+      #blind[hidden] {
+        display: none;
+      }
+
+      /* --- Landscape --------------------------------------------------------
+       *
+       * Turn the phone and the keypad genuinely rearranges, as the system one
+       * does: five columns instead of four, round keys become pills, the
+       * function keys move to column four and the operators to column five.
+       *
+       * The point of it here is the readout. Landscape is a third again as wide
+       * and the keypad needs less of the height, so the full eight-digit answer
+       * and the whole sum above it sit on screen at a size the back row can
+       * read. Portrait shrinks to fit; landscape is where it does not have to.
+       *
+       * Placement is spelled out per key rather than relying on source order,
+       * because the order on screen is not the order in the document any more.
+       */
+      @media (orientation: landscape) {
+        :root {
+          /*
+           * Height-bound, and deliberately modest.
+           *
+           * Landscape has width to spare and almost none to spare vertically:
+           * the readout and four rows of keys share what used to be the phone's
+           * width. 16.5vh is the largest the number can be while every key stays
+           * at least 44pt tall on the shortest phone that runs this — go past it
+           * and the keypad is cramped on a 13 mini before it is generous on
+           * anything.
+           */
+          --entry-size: min(16.5vh, 4.4rem);
+          --expression-size: min(6.5vh, 1.5rem);
+        }
+
+        #app {
+          padding: max(0.4rem, env(safe-area-inset-top)) max(0.9rem, env(safe-area-inset-right))
+            max(0.5rem, env(safe-area-inset-bottom)) max(0.9rem, env(safe-area-inset-left));
+        }
+
+        #chrome-row {
+          padding: 0.1rem 0.2rem 0;
+        }
+
+        .chrome-button {
+          width: 34px;
+          height: 34px;
+        }
+
+        .chrome-button svg {
+          width: 18px;
+          height: 18px;
+        }
+
+        /* The readout takes what it needs; the keypad takes the rest. */
+        #display {
+          flex: 0 0 auto;
+          /* Enough clearance that a comma's tail does not sit on the top row. */
+          padding: 0 0.4rem 0.55rem;
+        }
+
+        #keys {
+          flex: 1;
+          min-height: 0;
+          grid-template-columns: repeat(5, 1fr);
+          grid-template-rows: repeat(4, minmax(0, 1fr));
+          gap: min(2.2vh, 11px);
+          padding: 0 0.2rem;
+        }
+
+        .key {
+          /* Pills, not circles — the cell is wider than it is tall. */
+          aspect-ratio: auto;
+          border-radius: 999px;
+          font-size: min(6vh, 1.7rem);
+        }
+
+        .key.function {
+          font-size: min(5vh, 1.4rem);
+        }
+
+        .key.operator {
+          font-size: min(6.8vh, 1.9rem);
+        }
+
+        [data-key='7'] {
+          grid-area: 1 / 1;
+        }
+        [data-key='8'] {
+          grid-area: 1 / 2;
+        }
+        [data-key='9'] {
+          grid-area: 1 / 3;
+        }
+        [data-key='back'] {
+          grid-area: 1 / 4;
+        }
+        [data-key='÷'] {
+          grid-area: 1 / 5;
+        }
+
+        [data-key='4'] {
+          grid-area: 2 / 1;
+        }
+        [data-key='5'] {
+          grid-area: 2 / 2;
+        }
+        [data-key='6'] {
+          grid-area: 2 / 3;
+        }
+        [data-key='ac'] {
+          grid-area: 2 / 4;
+        }
+        [data-key='×'] {
+          grid-area: 2 / 5;
+        }
+
+        [data-key='1'] {
+          grid-area: 3 / 1;
+        }
+        [data-key='2'] {
+          grid-area: 3 / 2;
+        }
+        [data-key='3'] {
+          grid-area: 3 / 3;
+        }
+        [data-key='percent'] {
+          grid-area: 3 / 4;
+        }
+        [data-key='−'] {
+          grid-area: 3 / 5;
+        }
+
+        [data-key='sign'] {
+          grid-area: 4 / 1;
+        }
+        [data-key='0'] {
+          grid-area: 4 / 2;
+        }
+        [data-key='.'] {
+          grid-area: 4 / 3;
+        }
+        [data-key='='] {
+          grid-area: 4 / 4;
+        }
+        [data-key='+'] {
+          grid-area: 4 / 5;
+        }
+      }
+
+      /* Rehearsal readout. Hidden unless you ask for it. */
+      #rehearsal {
+        position: fixed;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        padding: 0.4rem 0.6rem;
+        background: rgba(255, 159, 10, 0.12);
+        color: var(--orange);
+        font-size: 0.7rem;
+        font-family: ui-monospace, monospace;
+        z-index: 60;
+        pointer-events: none;
+      }
+
+      #rehearsal[hidden] {
+        display: none;
+      }
+
+      /*
+       * The crib: the handling, on the prop itself.
+       *
+       * Behind a deliberate hold on the keypad icon, for the same reason the
+       * rehearsal readout is — anything that can appear on this screen by
+       * accident is a liability. Worth having on the phone rather than only in a
+       * file on a laptop, because the one moment you want reminding of the moves
+       * is five minutes before you do it.
+       */
+      #crib {
+        position: fixed;
+        inset: 0;
+        z-index: 70;
+        background: rgba(0, 0, 0, 0.94);
+        padding: max(1rem, env(safe-area-inset-top)) 1.2rem max(1rem, env(safe-area-inset-bottom));
+        overflow-y: auto;
+        font-size: 0.82rem;
+        line-height: 1.5;
+      }
+
+      #crib[hidden] {
+        display: none;
+      }
+
+      #crib h2 {
+        font-size: 0.72rem;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--orange);
+        margin: 0 0 0.6rem;
+      }
+
+      #crib ol {
+        margin: 0;
+        padding-left: 1.2rem;
+      }
+
+      #crib li {
+        margin-bottom: 0.5rem;
+      }
+
+      #crib b {
+        font-weight: 600;
+      }
+
+      #crib p {
+        color: #8e8e93;
+        font-size: 0.74rem;
+        margin: 0.9rem 0 0;
+      }
+    </style>
+  </head>
+
+  <body>
+    <div id="app">
+      <div id="chrome-row">
+        <button class="chrome-button" id="history" type="button" aria-label="History">
+          <svg
+            width="22"
+            height="22"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.7"
+            stroke-linecap="round"
+          >
+            <circle cx="12" cy="12" r="9.2" />
+            <path d="M12 6.6V12l3.6 2.2" />
+          </svg>
+        </button>
+        <button class="chrome-button" id="mode" type="button" aria-label="Calculator mode">
+          <svg
+            width="22"
+            height="22"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.6"
+          >
+            <rect x="5" y="2.4" width="14" height="19.2" rx="2.6" />
+            <rect x="7.6" y="5" width="8.8" height="3.4" rx="1" />
+            <g fill="currentColor" stroke="none">
+              <circle cx="9" cy="12" r="1.15" />
+              <circle cx="12" cy="12" r="1.15" />
+              <circle cx="15" cy="12" r="1.15" />
+              <circle cx="9" cy="15.4" r="1.15" />
+              <circle cx="12" cy="15.4" r="1.15" />
+              <circle cx="15" cy="15.4" r="1.15" />
+              <circle cx="9" cy="18.8" r="1.15" />
+              <circle cx="12" cy="18.8" r="1.15" />
+              <circle cx="15" cy="18.8" r="1.15" />
+            </g>
+          </svg>
+        </button>
+      </div>
+
+      <div id="display">
+        <div id="expression"></div>
+        <div id="entry">0</div>
+      </div>
+
+      <div id="keys">
+        <button class="key function" data-key="back" type="button">⌫</button>
+        <button class="key function" data-key="ac" type="button">AC</button>
+        <button class="key function" data-key="percent" type="button">%</button>
+        <button class="key operator" data-key="÷" type="button">÷</button>
+
+        <button class="key" data-key="7" type="button">7</button>
+        <button class="key" data-key="8" type="button">8</button>
+        <button class="key" data-key="9" type="button">9</button>
+        <button class="key operator" data-key="×" type="button">×</button>
+
+        <button class="key" data-key="4" type="button">4</button>
+        <button class="key" data-key="5" type="button">5</button>
+        <button class="key" data-key="6" type="button">6</button>
+        <button class="key operator" data-key="−" type="button">−</button>
+
+        <button class="key" data-key="1" type="button">1</button>
+        <button class="key" data-key="2" type="button">2</button>
+        <button class="key" data-key="3" type="button">3</button>
+        <button class="key operator" data-key="+" type="button">+</button>
+
+        <button class="key" data-key="sign" type="button" aria-label="Plus minus">
+          <svg
+            width="40%"
+            viewBox="0 0 40 40"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="3.2"
+            stroke-linecap="round"
+          >
+            <path d="M4 11h11M9.5 5.5v11" />
+            <path d="M32 7 8 33" />
+            <path d="M25 29h11" />
+          </svg>
+        </button>
+        <button class="key" data-key="0" type="button">0</button>
+        <button class="key" data-key="." type="button">.</button>
+        <button class="key operator" data-key="=" type="button">=</button>
+      </div>
+    </div>
+
+    <div id="blind" hidden></div>
+    <div id="rehearsal" hidden></div>
+
+    <div id="crib" hidden>
+      <h2>Handling</h2>
+      <ol>
+        <li>First spectator calls a <b>4-digit number</b>. Type it, press <b>+</b>.</li>
+        <li>Second spectator calls another. Type it, press <b>=</b>. Say the sum aloud.</li>
+        <li>
+          <b>Press and hold ×</b> for half a second. The key turns white — that is your
+          confirmation. A normal tap of × just multiplies.
+        </li>
+        <li>
+          Phone face down. Third spectator taps, <i>as many times as she likes</i>. Take it back,
+          <b>press and hold anywhere</b> to release the keypad.
+        </li>
+        <li>
+          Show her number, then press <b>=</b>. The room sees a real product — let it land. (Keys
+          are dead for a second after a release. That is the failsafe, not a fault.)
+        </li>
+        <li>
+          <b>Press and hold +</b> for half a second; it turns white the same way. Phone face down,
+          <i>fourth spectator</i> taps.
+        </li>
+        <li>
+          Take it back, <b>press and hold</b> to release, then <b>=</b>. That is the date and the
+          time — <b>the minute about to arrive</b>, not the one showing. Read it out, let them get
+          there, and the clock catches up while you do.
+        </li>
+      </ol>
+      <p>
+        <b>Any two numbers work.</b> Both blind numbers are worked out from whatever they call out,
+        so there is no size to judge and nothing to go wrong — unlike a routine where the room
+        supplies the multiply, this cannot overshoot the clock in any month.
+      </p>
+      <p>
+        Turn the phone sideways for the reveal — the full number and the whole sum sit at readable
+        size in landscape. Rotating changes nothing about the arithmetic and is safe at any point.
+      </p>
+      <p>Hold the clock icon, top left, for the rehearsal readout. Tap anywhere to close this.</p>
+      <!--
+        Which build is actually on the phone.
+
+        The point of a number here is that the answer "did my change land?" stops
+        being a judgement call about what the screen looks like. Bump it with any
+        change worth shipping, alongside CACHE in sw.js.
+      -->
+      <p id="build">Build 9 · 5 Nov</p>
+    </div>
+
+    <script>
+      // ---------------------------------------------------------------------
+      // The trick
+      // ---------------------------------------------------------------------
+      //
+      // The effect: two spectators each call a free number, you add them, and a
+      // third taps a phone she cannot see. The total is today's date and the
+      // time on the clock — and every calculator in the room agrees, because
+      // the arithmetic is real.
+      //
+      // Why it needs two blind numbers rather than one. You need
+      //
+      //     (A + B) × C  =  T
+      //
+      // where T is the clock. A and B are the audience's, so their sum S is
+      // whatever they make it, and C = T / S is a whole number only when S
+      // happens to divide T — about once in S tries, so a few times in a
+      // thousand performances. One blind number is one knob, and one knob
+      // cannot hit a target you do not control.
+      //
+      // Two knobs can. With
+      //
+      //     S × C + D  =  T
+      //
+      // there is always a solution: take C near T / S and let D be the
+      // remainder. Nothing is forced, nobody is steered, and all three
+      // spectators are genuinely free — the whole correction hides in the taps
+      // she cannot see.
+      //
+      // The cost is that C and D together have to carry about as many digits as
+      // T, which is why she taps eight or nine times and not three. Chasing a
+      // fixed count turned out to be a dead end: for a round sum like 1000 the
+      // remainder is pinned to D = 33, 1033, 2033 ... and can never reach the
+      // three-digit band that would make the total come out at eight. That is
+      // arithmetic, not a search problem.
+      //
+      // So the count is not fixed and does not need to be. She taps as many
+      // times as she likes, the app takes the digits it needs and swallows the
+      // rest, and you end it with a press and hold when you take the phone
+      // back. Freer to watch, and nothing to remember.
+
+      /**
+       * How far ahead of the clock the answer lands, in minutes.
+       *
+       * The reveal does not read as the time instantly. The room sees eight
+       * digits, then someone works out that the front of it is the date, then
+       * the back of it is the clock — and that takes a few seconds you have to
+       * fill. Landing on the minute that is about to arrive turns that pause
+       * from a gap into the effect: you have the whole of it to say what the
+       * number is, and the clock catches the phone up while you do.
+       *
+       * It also absorbs your own pace. The digits are fixed when you arm the
+       * second half, so every second between that and the final `=` is a second
+       * the clock moves and the answer does not. At zero lead a slow middle
+       * beat could land the answer a minute *behind* the room's phones, which
+       * is the one way this number can look simply wrong.
+       */
+      const LEAD_MINUTES = 1;
+
+      /** The date, and the minute the room is about to be in. */
+      function stamp(now = new Date()) {
+        // Built from a real Date so the rollovers come free: 23:59 becomes
+        // 00:00 tomorrow, and the last minute of a month becomes the first of
+        // the next, with the date moving to match.
+        const when = new Date(now.getTime() + LEAD_MINUTES * 60_000);
+        const pad = (value) => String(value).padStart(2, '0');
+        // Minutes, not seconds: every phone in the room shows the minute, so the
+        // whole number is checkable at a glance. Seconds would be unverifiable
+        // and — worse — would be misread as minutes and look wrong.
+        const text = `${pad(when.getMonth() + 1)}${pad(when.getDate())}${pad(when.getHours())}${pad(when.getMinutes())}`;
+        // January to September lose their leading zero, exactly as a calculator
+        // would show them: 5 March reads 3051012, not 03051012.
+        return Number(text);
+      }
+
+      /**
+       * The two blind numbers.
+       *
+       * The honest version is plain division with remainder: C is how many whole
+       * sums fit inside the target and D is what is left over. Exact for every
+       * sum and every clock time, with no search and nothing to fail.
+       *
+       * C is then stepped down by one, which is presentation rather than
+       * arithmetic. Left alone, D is uniform in [0, S) and nothing stops it
+       * coming out as 7, or 0 — and a second spectator who taps the screen once
+       * for a one-digit number is a thin moment in the middle of the routine
+       * and an invitation to wonder what she contributed. Stepping C down grows
+       * D by exactly S, putting it in [S, 2S): four or five digits for two
+       * 4-digit numbers, so she always has a handful of taps to make.
+       *
+       * S × C + D is still exactly T, which is the only thing the room checks.
+       */
+      function solve(sum, target) {
+        if (!Number.isInteger(sum) || sum < 1 || target < 1) return null;
+        const whole = Math.floor(target / sum);
+        // Step down only where there is room; at 1 the multiplier would go to
+        // zero and take the product with it.
+        const c = whole > 1 ? whole - 1 : whole;
+        if (c < 1) return null;
+        return { c, d: target - sum * c };
+      }
+
+      // ---------------------------------------------------------------------
+      // Calculator
+      // ---------------------------------------------------------------------
+      //
+      // A real one. It has to survive someone picking the phone up and using it,
+      // so precedence, percent, sign and backspace all behave — and the trick is
+      // layered on top rather than replacing any of it.
+
+      const entryEl = document.getElementById('entry');
+      const expressionEl = document.getElementById('expression');
+      const blindEl = document.getElementById('blind');
+      const rehearsalEl = document.getElementById('rehearsal');
+
+      /** Completed terms: numbers and operators, evaluated on `=`. */
+      let tokens = [];
+      /** The number being typed, as text so trailing dots and zeros survive. */
+      let entry = '0';
+      /** True once `=` has produced a value that further typing should replace. */
+      let settled = false;
+      /** The digits she is about to tap in, newest last. Empty when not armed. */
+      let blindDigits = [];
+      /** True while taps are being intercepted, including after the digits run out. */
+      let armed = false;
+      /** Which operator key is lit: '×' for the multiplier, '+' for the addend. */
+      let armedKey = null;
+      let showRehearsal = false;
+
+      const format = (value) => {
+        if (!Number.isFinite(value)) return 'Error';
+        // Grouping matches the system calculator, and it is what makes an eight
+        // digit answer readable across a room.
+        const [whole, fraction] = String(value).split('.');
+        const grouped = Number(whole).toLocaleString('en-US');
+        return fraction === undefined ? grouped : `${grouped}.${fraction}`;
+      };
+
+      /**
+       * Shrinks a readout until the whole of it is on screen.
+       *
+       * The answer is eight digits and the sum above it is longer still, so on a
+       * phone in portrait neither fits at full size. The system calculator
+       * handles this by shrinking the text, and so does this: clearing the
+       * inline size first re-reads the ceiling from CSS, so each render starts
+       * from full size and only comes down as far as it has to. Nothing is ever
+       * cut off, in either orientation — which is the point, since a number the
+       * audience cannot read in full is a number they cannot check.
+       */
+      function fit(element) {
+        element.style.fontSize = '';
+        const room = element.clientWidth;
+        if (room === 0) return;
+        const needed = element.scrollWidth;
+        if (needed <= room) return;
+        const ceiling = parseFloat(getComputedStyle(element).fontSize);
+        // The shade under 1 keeps a rounded-up fraction of a pixel from
+        // reintroducing the clipping this exists to remove.
+        element.style.fontSize = `${Math.max((ceiling * room * 0.99) / needed, 11)}px`;
+      }
+
+      function render() {
+        entryEl.textContent = entry === '' ? '0' : format(Number(entry)) || entry;
+        if (entry.endsWith('.')) entryEl.textContent += '.';
+        expressionEl.textContent = tokens
+          .map((token) => (typeof token === 'number' ? format(token) : token))
+          .join(' ');
+        fit(entryEl);
+        fit(expressionEl);
+
+        for (const button of document.querySelectorAll('.key.operator')) {
+          button.classList.toggle('armed', armed && button.dataset.key === armedKey);
+        }
+
+        rehearsalEl.hidden = !showRehearsal;
+      }
+
+      /** Evaluates the token list, multiplication and division first. */
+      function evaluate(list) {
+        const terms = list.slice();
+        for (let i = 1; i < terms.length; i += 2) {
+          if (terms[i] !== '×' && terms[i] !== '÷') continue;
+          const left = terms[i - 1];
+          const right = terms[i + 1];
+          const value = terms[i] === '×' ? left * right : left / right;
+          terms.splice(i - 1, 3, value);
+          i -= 2;
+        }
+        let total = terms[0] ?? 0;
+        for (let i = 1; i < terms.length; i += 2) {
+          total = terms[i] === '+' ? total + terms[i + 1] : total - terms[i + 1];
+        }
+        return total;
+      }
+
+      function digit(value) {
+        if (settled) {
+          entry = '';
+          settled = false;
+        }
+        if (value === '.' && entry.includes('.')) return;
+        if (entry === '0' && value !== '.') entry = '';
+        entry += value;
+        render();
+      }
+
+      function operator(symbol) {
+        tokens.push(Number(entry), symbol);
+        entry = String(Number(entry));
+        settled = true;
+        render();
+      }
+
+      function equals() {
+        if (tokens.length === 0) {
+          settled = true;
+          render();
+          return;
+        }
+        const total = evaluate([...tokens, Number(entry)]);
+        tokens = [];
+        entry = String(total);
+        settled = true;
+        render();
+      }
+
+      function clearAll() {
+        tokens = [];
+        entry = '0';
+        settled = false;
+        disarm();
+        render();
+      }
+
+      // ---------------------------------------------------------------------
+      // Blind taps
+      // ---------------------------------------------------------------------
+
+      /*
+       * Two blind numbers, two spectators, one each.
+       *
+       * The routine is in two halves with a reveal in the middle: hold `×`, the
+       * first spectator taps a multiplier, `=` shows the product and the room
+       * gets a number to look at. Hold `+`, a second spectator taps an addend,
+       * `=` lands on the clock.
+       *
+       * The second operator has to be `+`. For a second multiply to land on the
+       * clock the product on screen would have to divide it exactly, and since
+       * the sum came from the audience that happens about once in S attempts.
+       * Multiplication only scales; a remainder is the one operation that can
+       * absorb an arbitrary leftover, and the leftover here is handed to you by
+       * a clock. So the first half scales the sum up to just under the target
+       * and the second half closes the gap.
+       */
+
+      /** Lights an operator and starts intercepting taps for `digits`. */
+      function armWith(digits, key, crib) {
+        blindDigits = [...String(digits)];
+        armed = true;
+        armedKey = key;
+        blindEl.hidden = false;
+        rehearsalEl.textContent = `${crib}  ·  ${blindDigits.length} taps`;
+        render();
+      }
+
+      /** First half: hold `×`, she taps the multiplier. */
+      function arm() {
+        // The tap that started this hold has already pushed the `×`, so
+        // everything before it is the sum — whatever shape it is in.
+        if (tokens[tokens.length - 1] !== '×') return;
+
+        /*
+         * Settle the sum first, rather than trusting what is on the display.
+         *
+         * This used to read the entry, which is right only if `=` was pressed
+         * after the addition. Forget it — and it is one keystroke in the middle
+         * of talking to a room — and the phone was arming against the *second*
+         * spectator's number alone. Everything downstream still looked correct:
+         * the key went white, she tapped, the sum appeared, and the total was
+         * simply not the time. Nothing on screen said so.
+         *
+         * Collapsing it here means both routes end up identical. `A + B ×`
+         * becomes `S ×`, which is the number you were going to say aloud
+         * anyway, and the expression on screen is exactly what gets evaluated.
+         */
+        const sum = evaluate(tokens.slice(0, -1));
+        const answer = solve(sum, stamp());
+        if (answer === null) return;
+
+        tokens = [sum, '×'];
+        entry = String(sum);
+        settled = true;
+
+        armWith(answer.c, '×', `${sum} × ${answer.c}, then + ${answer.d}`);
+      }
+
+      /**
+       * Second half: hold `+`, a different spectator taps the addend.
+       *
+       * The gap is measured against the clock *now*, not against the one read
+       * when the multiplier was armed. That costs nothing and buys something
+       * worth having: however long you spend on the middle reveal — a minute of
+       * patter, a question from the floor, someone checking the product on their
+       * own phone — the final number is still the time it actually is when you
+       * get there. The delay corrects itself.
+       */
+      function armPlus() {
+        if (tokens[tokens.length - 1] !== '+') return;
+
+        const running = evaluate(tokens.slice(0, -1));
+        // Read once. Two calls can straddle the turn of a minute, which would
+        // arm one number and print another on the rehearsal line — a
+        // disagreement that only shows up when you are checking the thing you
+        // rehearse with.
+        const target = stamp();
+        const gap = target - running;
+        // Negative means the product already overshot the clock, which only
+        // happens if the first half was armed against a different sum. Better a
+        // key that stays orange than a total that is not the time.
+        if (!Number.isInteger(gap) || gap < 0) return;
+
+        tokens = [running, '+'];
+        entry = String(running);
+        settled = true;
+
+        armWith(gap, '+', `${running} + ${gap} = ${target}`);
+      }
+
+      /** Abandons her number unfinished. Only AC does this. */
+      function disarm() {
+        blindDigits = [];
+        armed = false;
+        armedKey = null;
+        blindEl.hidden = true;
+        render();
+      }
+
+      /*
+       * Takes the phone back, finishing her number for her.
+       *
+       * She is told to tap as many times as she likes, and the one thing that
+       * phrase has to mean is that too few is as safe as too many. It was not:
+       * extra taps were swallowed, but stopping short left the rest of the
+       * digits unentered and the total quietly wrong — no error, no warning,
+       * just a number that is not the time. You cannot count her taps while the
+       * phone is face down and you are talking, so the app finishes what is
+       * left the moment you take it back.
+       */
+      function release() {
+        while (blindDigits.length > 0) digit(blindDigits.shift());
+        disarm();
+        seal();
+      }
+
+      /*
+       * The failsafe: the number cannot be touched until the tapping stops.
+       *
+       * Dropping the overlay is the one moment the prop is exposed. It is meant
+       * to happen when you take the phone back, but a spectator who rests a
+       * finger for half a second performs exactly the same gesture — she is
+       * tapping a screen she cannot see, so she does not know she has done it.
+       * The old behaviour then put her remaining taps on a live keypad, where
+       * they appended digits to the force number, or pressed `=` early, or hit
+       * AC. Any of those ends the routine and none of them look like anything
+       * from the front.
+       *
+       * So after a release every key is inert, and stays inert for as long as
+       * the screen keeps being touched: each stray tap is swallowed and pushes
+       * the unlock further out. The seal lifts only after the screen has been
+       * left alone for most of a second, which is a thing that happens when the
+       * phone is in your hand and not before. Whatever she does, the display
+       * stays on the force number and the pending operator.
+       *
+       * It costs the handling nothing. By the time you have taken the phone,
+       * turned it over and shown her number, the second is long gone.
+       */
+      const QUIET = 900;
+      let sealed = false;
+      let sealTimer = 0;
+
+      function seal() {
+        sealed = true;
+        window.clearTimeout(sealTimer);
+        sealTimer = window.setTimeout(() => {
+          sealed = false;
+        }, QUIET);
+      }
+
+      // Capture phase, so this runs before the keypad's own handler and can stop
+      // the event reaching it at all. Nothing below gets a say while sealed.
+      document.addEventListener(
+        'pointerdown',
+        (event) => {
+          if (!sealed) return;
+          event.preventDefault();
+          event.stopPropagation();
+          seal();
+        },
+        true,
+      );
+
+      /*
+       * Every tap she makes, until you end it.
+       *
+       * Taps past the ones the number needs are swallowed rather than passed
+       * through to the keypad, which is what lets you tell her to tap as many
+       * times as she likes — she cannot overrun it and she cannot wreck the
+       * display. It ends on a press and hold, which is a thing you do when you
+       * pick the phone back up and she will not do by accident.
+       *
+       * The hold is armed on *every* tap, finished number or not. It used to
+       * start only once the digits ran out, so stopping her early left no way
+       * out at all: a press and hold just entered another digit, and the only
+       * exit was to keep tapping until the number happened to complete. The one
+       * gesture you reach for when you take the phone back has to work whenever
+       * you reach for it.
+       */
+      let blindHold = 0;
+      let holdFrom = null;
+
+      blindEl.addEventListener('pointerdown', (event) => {
+        event.preventDefault();
+        // Extra fingers are part of the same gesture, not more taps. Without
+        // this a two-fingered press spends two digits and leaves two hold
+        // timers racing, one of which the first lifted finger cancels.
+        if (!event.isPrimary) return;
+
+        holdFrom = { x: event.clientX, y: event.clientY };
+        blindHold = window.setTimeout(release, 600);
+
+        const next = blindDigits.shift();
+        if (next === undefined) return; // Out of digits: the tap is absorbed.
+        digit(next);
+      });
+
+      // A hold that travels is a drag, not a hold. Taking the phone back is a
+      // thumb put down and kept still; a hand sliding over a face-down screen
+      // is not, and should not end anything.
+      blindEl.addEventListener('pointermove', (event) => {
+        if (holdFrom === null) return;
+        const moved = Math.hypot(event.clientX - holdFrom.x, event.clientY - holdFrom.y);
+        if (moved > 24) window.clearTimeout(blindHold);
+      });
+
+      for (const done of ['pointerup', 'pointercancel', 'pointerleave']) {
+        blindEl.addEventListener(done, () => {
+          window.clearTimeout(blindHold);
+          holdFrom = null;
+        });
+      }
+
+      // ---------------------------------------------------------------------
+      // Keypad
+      // ---------------------------------------------------------------------
+
+      document.getElementById('keys').addEventListener('pointerdown', (event) => {
+        const button = event.target.closest('.key');
+        if (button === null) return;
+        event.preventDefault();
+        const key = button.dataset.key;
+
+        /*
+         * Hold the multiply to arm her taps.
+         *
+         * A tap multiplies, exactly as it should — this has to survive somebody
+         * picking the phone up and working out a tip on it, and an earlier
+         * version that armed on every `×` turned an innocent 12 + 3 × 4 into a
+         * dead screen. Holding is deliberate, invisible from a foot away, and
+         * something nobody does by accident. The key going white is your
+         * confirmation before the phone goes over.
+         */
+        if (key === '×') armTimer = window.setTimeout(arm, 500);
+        if (key === '+') armTimer = window.setTimeout(armPlus, 500);
+
+        if (/^[0-9.]$/.test(key)) return digit(key);
+        if (key === '+' || key === '−' || key === '×' || key === '÷') {
+          return operator(key === '−' ? '-' : key);
+        }
+        if (key === '=') return equals();
+        if (key === 'ac') return clearAll();
+        if (key === 'back') {
+          entry = entry.length > 1 ? entry.slice(0, -1) : '0';
+          return render();
+        }
+        if (key === 'percent') {
+          entry = String(Number(entry) / 100);
+          return render();
+        }
+        if (key === 'sign') {
+          entry = entry.startsWith('-') ? entry.slice(1) : `-${entry}`;
+          return render();
+        }
+      });
+
+      let armTimer = 0;
+      for (const done of ['pointerup', 'pointercancel', 'pointerleave']) {
+        document.getElementById('keys').addEventListener(done, () => window.clearTimeout(armTimer));
+      }
+
+      // Rehearsal: press and hold the clock. Shows what she is about to tap, so
+      // you can check the arithmetic before you ever do this in front of anyone.
+      let holdTimer = 0;
+      const history = document.getElementById('history');
+      history.addEventListener('pointerdown', () => {
+        holdTimer = window.setTimeout(() => {
+          showRehearsal = !showRehearsal;
+          render();
+        }, 800);
+      });
+      for (const done of ['pointerup', 'pointerleave', 'pointercancel']) {
+        history.addEventListener(done, () => window.clearTimeout(holdTimer));
+      }
+
+      // The crib: hold the keypad icon. Same reasoning as the rehearsal readout
+      // — reachable in the green room, impossible to summon by accident.
+      let cribTimer = 0;
+      const cribEl = document.getElementById('crib');
+      const mode = document.getElementById('mode');
+      mode.addEventListener('pointerdown', () => {
+        cribTimer = window.setTimeout(() => {
+          cribEl.hidden = false;
+        }, 800);
+      });
+      for (const done of ['pointerup', 'pointerleave', 'pointercancel']) {
+        mode.addEventListener(done, () => window.clearTimeout(cribTimer));
+      }
+
+      // A tap anywhere closes it. It cannot be the same hold that opened it: the
+      // card covers the whole screen, icon included, so a second hold never
+      // reaches the button underneath — which left the only way out being to
+      // kill the app, in the exact five minutes before a show when you would
+      // least like to.
+      cribEl.addEventListener('click', () => {
+        cribEl.hidden = true;
+      });
+
+      // Rotating changes how much room the readout has, so it has to be measured
+      // again. `orientationchange` fires before the new size is readable on some
+      // builds, hence the resize as well — both are cheap and idempotent.
+      for (const event of ['resize', 'orientationchange']) {
+        window.addEventListener(event, () => window.requestAnimationFrame(render));
+      }
+
+      render();
+
+      // Put the files on the phone, so the prop does not depend on the venue
+      // having signal. Needs a secure origin, which rules it out over plain
+      // http and from a file:// URL — neither of which matters, because the
+      // install happens once from the real address and never again.
+      if ('serviceWorker' in navigator) {
+        window.addEventListener('load', () => {
+          navigator.serviceWorker.register('./sw.js').catch(() => {
+            // Offline support is the only casualty, and only until it is opened
+            // somewhere it can register. Nothing about the routine depends on it
+            // having succeeded, so there is nothing worth saying here.
+          });
+        });
+
+        /*
+         * When a new worker takes over, reload once so the page running is the
+         * page that was just installed.
+         *
+         * Without this an update lands a launch late: the new worker is in
+         * charge but the open page is still the old HTML, which is how a fixed
+         * bug can stay on screen for days and have you doubting the fix rather
+         * than the delivery.
+         *
+         * Only when there was a controller to begin with. The same event fires
+         * on a first install, when a worker claims a page that had none — and
+         * reloading on that is an endless refresh the first time anyone opens
+         * the address.
+         */
+        const hadController = navigator.serviceWorker.controller !== null;
+        let reloading = false;
+        navigator.serviceWorker.addEventListener('controllerchange', () => {
+          if (!hadController || reloading) return;
+          reloading = true;
+          window.location.reload();
+        });
+      }
+    </script>
+  </body>
+</html>

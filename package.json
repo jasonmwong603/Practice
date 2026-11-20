@@ -1,0 +1,25 @@
+{
+  "name": "practice",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Small self-contained web apps, served from one static host.",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.10"
+  },
+  "scripts": {
+    "start": "node host/server.mjs",
+    "test": "vitest run && npm run check",
+    "test:watch": "vitest",
+    "check": "node apps/clockwork/check.mjs",
+    "test:browser": "node apps/clockwork/smoke.mjs",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "devDependencies": {
+    "playwright": "^1.62.1",
+    "prettier": "^3.4.2",
+    "vitest": "^4.1.10"
+  }
+}

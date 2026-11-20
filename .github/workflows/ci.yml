@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+# A new push to the same branch makes an in-flight run obsolete.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: npm
+
+      - run: npm ci
+
+      # The host's own tests, then each app's arithmetic. For a trick, the
+      # arithmetic check is the one that matters: if it ever reports less than
+      # 100% exact, the room's calculators disagree with the phone.
+      - name: Test
+        run: npm test
+
+      # Drives a real browser against the apps, on a phone viewport. Whole-app
+      # breakage that headless checks cannot see — a dead keypad, an overlay
+      # that never lifts, a number clipped off the side of the screen — only
+      # shows up here.
+      - name: Browser tests
+        run: npm run test:browser
+
+      - name: Check formatting
+        run: npm run format:check
